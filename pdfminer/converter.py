@@ -197,6 +197,51 @@ class TextConverter(PDFConverter):
         return
 
 
+class PositionAwareString(str):
+    def __init__(self, *arg, **kwarg):
+        str.__init__(self, *arg, **kwarg)
+        self.prev_str = None
+        self.next_str = None
+
+
+class StringChain(list):
+    def __init__(self, *arg, **kwarg):
+        list.__init__(self, *arg, **kwarg)
+        self.fonts = []
+
+    def markup(self):
+        # determine max and mode font size
+        self.header_size_threshholds = []  # assign
+        self.boldness = ''
+        self.headerness = ''
+        for itm in self:
+            # escape literal *, #, []()
+            # find the boldness and headerness of a single word
+            # if changed:
+                # close the existing boldness
+                # mark the new one
+            pass
+
+
+class MarkdownConverter(TextConverter):
+
+    def __init__(self, *args, **kwargs):
+        TextConverter.__init__(self, *arg, **kwargs)
+        self.words = []
+        self.font_sizes = []
+
+    def write_text(self, text):
+        word = PositionAwareString(text.encode(self.codec, 'ignore'))
+        word.font = text.font
+        if self.words:
+            self.words[-1].next_str = word
+            word.prev_str = self.words[-1]
+        self.words.append(word)
+        if word.strip():
+            self.font_sizes.append(text.font)
+        return
+
+
 ##  HTMLConverter
 ##
 class HTMLConverter(PDFConverter):
@@ -333,6 +378,7 @@ class HTMLConverter(PDFConverter):
             return
 
         def render(item):
+            import ipdb; ipdb.set_trace()
             if isinstance(item, LTPage):
                 self._yoffset += item.y1
                 self.place_border('page', 1, item)
