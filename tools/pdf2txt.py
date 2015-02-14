@@ -6,6 +6,7 @@ from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.pdfdevice import PDFDevice, TagExtractor
 from pdfminer.pdfpage import PDFPage
 from pdfminer.converter import XMLConverter, HTMLConverter, TextConverter
+from pdfminer.converter import MarkdownConverter
 from pdfminer.cmapdb import CMapDB
 from pdfminer.layout import LAParams
 from pdfminer.image import ImageWriter
@@ -88,6 +89,9 @@ def main(argv):
     if outtype == 'text':
         device = TextConverter(rsrcmgr, outfp, codec=codec, laparams=laparams,
                                imagewriter=imagewriter)
+    elif outtype == 'md':
+        device = MarkdownConverter(rsrcmgr, outfp, codec=codec, laparams=laparams,
+                               imagewriter=imagewriter)
     elif outtype == 'xml':
         device = XMLConverter(rsrcmgr, outfp, codec=codec, laparams=laparams,
                               imagewriter=imagewriter,
@@ -108,6 +112,9 @@ def main(argv):
                                       caching=caching, check_extractable=True):
             page.rotate = (page.rotate+rotation) % 360
             interpreter.process_page(page)
+            if outtype == 'md':
+                device.string_chain.markup()
+                device.string_chain.write()
         fp.close()
     device.close()
     outfp.close()

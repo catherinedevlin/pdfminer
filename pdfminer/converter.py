@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from decimal import Decimal
 import logging
 import re
 from .pdfdevice import PDFTextDevice
@@ -162,7 +163,11 @@ class TextConverter(PDFConverter):
         self.imagewriter = imagewriter
         return
 
-    def write_text(self, text):
+    def write_text(self, item):
+        if hasattr(item, 'get_text'):
+            text = item.get_text()
+        else:
+            text = item
         self.outfp.write(text.encode(self.codec, 'ignore'))
         return
 
@@ -172,7 +177,7 @@ class TextConverter(PDFConverter):
                 for child in item:
                     render(child)
             elif isinstance(item, LTText):
-                self.write_text(item.get_text())
+                self.write_text(item)
             if isinstance(item, LTTextBox):
                 self.write_text('\n')
             elif isinstance(item, LTImage):
@@ -197,48 +202,123 @@ class TextConverter(PDFConverter):
         return
 
 
-class PositionAwareString(str):
-    def __init__(self, *arg, **kwarg):
-        str.__init__(self, *arg, **kwarg)
+class PositionAwareString(object):
+    def __init__(self, renderable, codec):
+        self.renderable = renderable
+        self.codec = codec
         self.prev_str = None
         self.next_str = None
 
+    def __repr__(self):
+        return u'%s <font=%s size=%s>' % (
+            self.renderable, self.fontname, self.size)
+
+    def bytestring(self):
+        return self.renderable.encode(self.codec, 'ignore')
+
 
 class StringChain(list):
-    def __init__(self, *arg, **kwarg):
-        list.__init__(self, *arg, **kwarg)
-        self.fonts = []
+    def __init__(self, lst, outfp):
+        list.__init__(self, lst)
+        self.outfp = outfp
+
+    def most_common_size(self):
+        """Statistical mode of the .size.
+
+        Thanks to David Dao, http://stackoverflow.com/a/28129716/86209"""
+        sizes = [w.size for w in self]
+        return max(set(sizes), key=sizes.count)
 
     def markup(self):
-        # determine max and mode font size
-        self.header_size_threshholds = []  # assign
-        self.boldness = ''
-        self.headerness = ''
+        """Add Markdown bold/italic/header indicators"""
+
+        self[-1].prev_str = self[-2]
+        self.set_boldness()
+        self.set_headerness()
+        self.escape()
+
+        for w in self:
+            if not w.prev_str:
+                w.renderable = u'%s%s%s' % (w.headerness, w.boldness, w.renderable)
+            elif not w.next_str:
+                w.renderable = u'%s%s' % (w, w.boldness)
+            else:
+                if w.boldness != w.prev_str.boldness:
+                    # close previous boldness
+                    w.prev_str.renderable = u'%s%s' % (
+                        w.prev_str.renderable, w.prev_str.boldness)
+                    # open a new boldness
+                    w.renderable = u'%s%s' % (w.boldness, w.renderable)
+                if w.headerness != w.prev_str.headerness:
+                    w.renderable = u'\n\n%s%s' % (w.headerness, w.renderable)
+
+    def escape(self):
+        for w in self:
+            w.renderable = w.renderable.replace(u'*', u'\*')
+        # also beginning # signs TODO
+
+    def set_boldness(self):
+        for w in self:
+            if 'bold' in w.fontname:
+                w.boldness = u'**'
+            elif 'italic' in w.fontname:
+                w.boldness = u'*'
+            else:
+                w.boldness = u''
+
+    def set_headerness(self):
+        std_size = self.most_common_size()
+        sizes = [w.size for w in self if w.renderable.strip() and w.size]
+        max_size = max(sizes)
+        most_common_size = max(set(sizes), key=sizes.count)
+        if most_common_size == max_size:
+            # no detectable headers
+            # perhaps they can be surmised from an entire bold line?  (TODO)
+            for w in self:
+                w.headerness = u''
+        else:
+            for w in self:
+                if w.size == max_size:
+                    w.headerness = u'# '
+                elif w.size > most_common_size:
+                    w.headerness = u'## '
+                else:
+                    w.headerness = u''
+
+    def write(self):
         for itm in self:
-            # escape literal *, #, []()
-            # find the boldness and headerness of a single word
-            # if changed:
-                # close the existing boldness
-                # mark the new one
-            pass
+            self.outfp.write(itm.bytestring())
 
 
 class MarkdownConverter(TextConverter):
 
-    def __init__(self, *args, **kwargs):
-        TextConverter.__init__(self, *arg, **kwargs)
-        self.words = []
-        self.font_sizes = []
+    def __init__(self, rsrcmgr, outfp, **kwargs):
+        TextConverter.__init__(self, rsrcmgr, outfp, **kwargs)
+        self.string_chain = StringChain([], outfp)
 
-    def write_text(self, text):
-        word = PositionAwareString(text.encode(self.codec, 'ignore'))
-        word.font = text.font
-        if self.words:
-            self.words[-1].next_str = word
-            word.prev_str = self.words[-1]
-        self.words.append(word)
-        if word.strip():
-            self.font_sizes.append(text.font)
+    def write_text(self, item):
+        """Store string with its font info into self.string_chain
+           for later font analysis and ultimately output (but not yet)."""
+        size = None
+        fontname = ''
+        try:
+            text = item.get_text()
+        except AttributeError:
+            text = item
+        try:
+            if text.strip():     # "font size" of whitespace irrelevant
+                # round off font size so that we can find its mode later
+                size = Decimal(item.size).quantize(Decimal('.001'))
+                fontname = item.fontname.lower()
+        except AttributeError:
+            pass
+        word = PositionAwareString(text, self.codec)
+        word.size = size
+        word.fontname = fontname
+        if self.string_chain:
+            self.string_chain[-1].next_str = word
+            word.prev_str = self.string_chain[-1]
+        self.string_chain.append(word)
         return
 
 
@@ -378,7 +458,6 @@ class HTMLConverter(PDFConverter):
             return
 
         def render(item):
-            import ipdb; ipdb.set_trace()
             if isinstance(item, LTPage):
                 self._yoffset += item.y1
                 self.place_border('page', 1, item)
