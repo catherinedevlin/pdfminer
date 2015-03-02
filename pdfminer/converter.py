@@ -208,10 +208,10 @@ class PositionAwareString(object):
         self.codec = codec
         self.prev_str = None
         self.next_str = None
+        self.is_indented = False
 
     def __repr__(self):
-        return u'%s <font=%s size=%s>' % (
-            self.renderable, self.fontname, self.size)
+        return self.renderable
 
     def bytestring(self):
         return self.renderable.encode(self.codec, 'ignore')
@@ -221,6 +221,7 @@ class StringChain(list):
     def __init__(self, lst, outfp):
         list.__init__(self, lst)
         self.outfp = outfp
+        last_word = None
 
     def most_common_size(self):
         """Statistical mode of the .size.
@@ -233,20 +234,21 @@ class StringChain(list):
         """Add Markdown bold/italic/header indicators"""
 
         self[-1].prev_str = self[-2]
+        self.find_indents()
         self.set_boldness()
         self.set_headerness()
         self.escape()
-
+      
         for w in self:
             if not w.prev_str:
                 w.renderable = u'%s%s%s' % (w.headerness, w.boldness, w.renderable)
             elif not w.next_str:
                 w.renderable = u'%s%s' % (w, w.boldness)
             else:
-                if w.boldness != w.prev_str.boldness:
+                if (w.boldness != w.prev_str.boldness) or (w.headerness != w.prev_str.headerness):
                     # close previous boldness
                     w.prev_str.renderable = u'%s%s' % (
-                        w.prev_str.renderable, w.prev_str.boldness)
+                        w.prev_str.renderable.rstrip(), w.prev_str.boldness)
                     # open a new boldness
                     w.renderable = u'%s%s' % (w.boldness, w.renderable)
                 if w.headerness != w.prev_str.headerness:
@@ -257,6 +259,29 @@ class StringChain(list):
             w.renderable = w.renderable.replace(u'*', u'\*')
         # also beginning # signs TODO
 
+    def find_indents(self):
+        
+        self[0].indent = current_indent = 0
+        for (idx, w) in enumerate(self[1:]):
+            if w.x0:
+                if (not current_indent) or ('\n' in self[idx-1].renderable):
+                    current_indent = w.indent = w.x0
+            w.indent = current_indent
+                    
+        least_indented = 1000000000
+        col_start = 0
+        for (idx, w) in enumerate(self):
+            if w.y0 and w.prev_str and (w.y0 > w.prev_str.y0):
+                # now we know the leftmost edge of this column, can set ``is_indented``
+                for w2 in self[col_start:idx-1]:
+                    w2.is_indented = (w2.indent > least_indented)
+                least_indented = w.indent
+                col_start = idx
+        for y in self[col_start:idx-1]:
+            y.is_indented = (y.indent > least_indented)
+            
+        self.anything_is_indented = max([w.is_indented for w in self])
+        
     def set_boldness(self):
         for w in self:
             if 'bold' in w.fontname:
@@ -268,22 +293,33 @@ class StringChain(list):
 
     def set_headerness(self):
         std_size = self.most_common_size()
-        sizes = [w.size for w in self if w.renderable.strip() and w.size]
+        sizes = [w.size for w in self if w.size]
         max_size = max(sizes)
         most_common_size = max(set(sizes), key=sizes.count)
-        if most_common_size == max_size:
-            # no detectable headers
-            # perhaps they can be surmised from an entire bold line?  (TODO)
-            for w in self:
-                w.headerness = u''
-        else:
-            for w in self:
-                if w.size == max_size:
-                    w.headerness = u'# '
-                elif w.size > most_common_size:
-                    w.headerness = u'## '
-                else:
-                    w.headerness = u''
+        next_size_up = max([s for s in sizes if s > most_common_size])
+        
+        for w in self:
+            w.relative_header_score = 0
+            if w.is_indented:
+                w.relative_header_score += 1
+            if w.size > std_size:
+                w.relative_header_score += 1
+            if next_size_up and (w.size > next_size_up):
+                w.relative_header_score += 1
+            if (w.size == max_size) and next_size_up and (max_size > next_size_up):
+                w.relative_header_score += 1
+                
+        max_rel_rank = max(w.relative_header_score for w in self)
+        min_rel_rank = min(w.relative_header_score for w in self)
+        
+        score_to_headerness_map = {}
+        headerness = u'#'
+        for rank in range(max_rel_rank, min_rel_rank, -1):
+            score_to_headerness_map[rank] = u'%s ' % headerness
+            headerness += '#'
+            
+        for w in self:
+            w.headerness = score_to_headerness_map.get(w.relative_header_score, '')
 
     def write(self):
         for itm in self:
@@ -299,6 +335,7 @@ class MarkdownConverter(TextConverter):
     def write_text(self, item):
         """Store string with its font info into self.string_chain
            for later font analysis and ultimately output (but not yet)."""
+        
         size = None
         fontname = ''
         try:
@@ -306,19 +343,26 @@ class MarkdownConverter(TextConverter):
         except AttributeError:
             text = item
         try:
-            if text.strip():     # "font size" of whitespace irrelevant
-                # round off font size so that we can find its mode later
-                size = Decimal(item.size).quantize(Decimal('.001'))
-                fontname = item.fontname.lower()
+            (x0, y0) = (item.x0, item.y0)
+        except AttributeError:
+            (x0, y0) = (None, None)
+        try:
+            # round off font size so that we can find its mode later
+            size = Decimal(item.size).quantize(Decimal('.001'))
+            fontname = item.fontname.lower()
         except AttributeError:
             pass
         word = PositionAwareString(text, self.codec)
         word.size = size
         word.fontname = fontname
+        word.x0 = x0
+        word.y0 = y0
         if self.string_chain:
-            self.string_chain[-1].next_str = word
-            word.prev_str = self.string_chain[-1]
+            word.prev_str = self.string_chain.last_word
         self.string_chain.append(word)
+        if size:
+            self.string_chain.last_word = word
+            self.string_chain.last_word.next_str = word
         return
 
 
